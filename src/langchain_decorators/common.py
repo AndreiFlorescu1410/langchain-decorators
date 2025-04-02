@@ -1,4 +1,3 @@
-
 import re
 import inspect
 import json
@@ -16,18 +15,11 @@ from langchain.prompts.chat import ChatMessagePromptTemplate
 from .schema import OutputWithFunctionCall
 from typing_inspect import is_generic_type, is_union_type
 
-import pydantic
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.fields import FieldInfo
 
 USE_PREVIEW_MODELS = os.environ.get("LANGCHAIN_DECORATORS_USE_PREVIEW_MODELS", True) in [True,"true","True","1"]
 
-
-if pydantic.__version__ <"2.0.0":
-    from pydantic import BaseConfig, BaseModel, Extra, Field
-    from pydantic.fields import ModelField
-else:
-    from pydantic.v1 import BaseConfig, BaseModel, Extra, Field
-    from pydantic.v1.fields import ModelField
-    
 if TYPE_CHECKING:
     from .prompt_template import BaseTemplateBuilder
 
@@ -37,8 +29,8 @@ class LlmSelector(BaseModel):
     rules:List[dict]=[]
     llms:Dict[int,BaseLanguageModel]=Field(default_factory=dict)
     streamable_llms_cache:Dict[int,BaseLanguageModel]=Field(default_factory=dict)
-    generation_min_tokens:Optional[int]
-    prompt_to_generation_ratio:Optional[float]
+    generation_min_tokens:Optional[int] = None
+    prompt_to_generation_ratio:Optional[float] = None
 
     def __init__(self, generation_min_tokens:int=None, prompt_to_generation_ratio:float=1/3):
         """ Create a LlmSelector that will select the llm based on the length of the prompt.
@@ -160,10 +152,7 @@ class GlobalSettings(BaseModel):
     logging_level: int = logging.INFO
     verbose: bool = False
     llm_selector: Optional[LlmSelector] = None
-
-    class Config:
-        allow_population_by_field_name = True
-        extra = Extra.allow
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     @classmethod
     def define_settings(cls,
@@ -383,22 +372,22 @@ def get_function_full_name(func: callable)->str:
     
 
 
-def get_arguments_as_pydantic_fields(func) -> Dict[str, ModelField]:
+def get_arguments_as_pydantic_fields(func) -> Dict[str, FieldInfo]:
+    """Convert function arguments into Pydantic FieldInfo objects.
+    
+    This is used for validation and type checking of function arguments.
+    """
     argument_types = {}
-    model_config = BaseConfig()
     for arg_name, arg_desc in inspect.signature(func).parameters.items():
-        if arg_name != "self" and not (arg_name.startswith("_") and arg_desc.default!=inspect.Parameter.empty):
-            default = arg_desc.default if arg_desc.default!=inspect.Parameter.empty else None
-            if arg_desc.annotation==inspect._empty:
+        if arg_name != "self" and not (arg_name.startswith("_") and arg_desc.default != inspect.Parameter.empty):
+            if arg_desc.annotation == inspect._empty:
                 raise Exception(f"Argument '{arg_name}' of function {func.__name__} has no type annotation")
-            argument_types[arg_name] = ModelField(
-                class_validators=None,
-                model_config=model_config,
-                name=arg_name, 
-                type_=arg_desc.annotation,
-                default=default,
-                required= arg_desc.default==inspect.Parameter.empty
-                )
+            
+            field_info = Field(
+                default=arg_desc.default if arg_desc.default != inspect.Parameter.empty else ...,
+                annotation=arg_desc.annotation
+            )
+            argument_types[arg_name] = field_info
             
     return argument_types
 

@@ -5,22 +5,16 @@ from langchain.schema import AIMessage
 from langchain.schema import FunctionMessage
 import json
 
-import pydantic
-if pydantic.__version__ <"2.0.0":
-    from pydantic import BaseModel, PrivateAttr
-else:
-    from pydantic.v1 import BaseModel, PrivateAttr
-
-
+from pydantic import BaseModel, PrivateAttr
 
 T = TypeVar("T")
 
-class OutputWithFunctionCall(Generic[T],BaseModel):
+class OutputWithFunctionCall(BaseModel, Generic[T]):
     output_text:str
     output_message:AIMessage
     output:T
     function_name:str =None
-    function_arguments:Union[Dict[str,Any],str,None]
+    function_arguments:Union[Dict[str,Any],str,None] = None
     function:Callable = None
     function_async:Callable = None
     result: Any = None

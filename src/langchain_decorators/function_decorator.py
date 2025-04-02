@@ -16,24 +16,9 @@ from typing import (
     get_origin,
 )
 
-import pydantic
-
-if pydantic.__version__ < "2.0.0":
-    from pydantic import BaseModel
-    from pydantic.schema import (
-        add_field_type_to_schema,
-        field_schema,
-        get_flat_models_from_fields,
-        get_model_name_map,
-    )
-else:
-    from pydantic.v1 import BaseModel
-    from pydantic.v1.schema import (
-        field_schema,
-        get_flat_models_from_fields,
-        get_model_name_map,
-        add_field_type_to_schema,
-    )
+from pydantic import BaseModel
+from pydantic.json_schema import model_json_schema
+from pydantic.fields import FieldInfo
 
 from .common import (
     get_arguments_as_pydantic_fields,
@@ -263,137 +248,63 @@ def build_func_schema(
     func_description: str = None,
     schema_template_parameters: Dict[str, Any] = None,
 ):
-
+    """
+    Build function schema for LLM function.
+    """
     if isinstance(format, str):
         format = DocstringsFormat(format)
 
-    if not (func_description and arguments_schema):
+    if not function_name:
+        function_name = func.__name__
+
+    if not func_description:
         func_docs = get_function_docs(func)
-        if schema_template_parameters:
-            func_docs = format_str_extra(func_docs, **schema_template_parameters)
-    else:
-        func_docs = None
-
-    if function_name and not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", function_name):
-        raise ValueError(
-            f"Invalid function name: {function_name} for {get_function_full_name(func)}. Only letters, numbers and underscores are allowed. The name must start with a letter or an underscore."
-        )
-
-    func_name = function_name or func.__name__
-    args_schema = None
-
-    if arguments_schema and isinstance(arguments_schema, Type):
-        args_schema = arguments_schema.schema()
-        sanitize_pydantic_schema(args_schema)
-        args_schema = {
-            "type": "object",
-            "properties": args_schema["properties"],
-            "required": args_schema["required"],
-        }
-    elif arguments_schema and isinstance(arguments_schema, dict):
-        if "properties" in arguments_schema:
-            sanitize_pydantic_schema(arguments_schema)
-            # arguments schema is a OPENAPI schema
-            args_schema = arguments_schema
-        elif any((v for v in arguments_schema.values() if isinstance(v, str))):
-            # arguments schema is a dict of types
-            args_schema = {
-                "type": "object",
-                "properties": {
-                    k: {"title": k, "description": v, "type": "string"}
-                    for k, v in arguments_schema.items()
-                },
-                "required": [k for k, v in arguments_schema.items() if v is not None],
-            }
-        else:
-            raise ValueError(
-                "Invalid arguments_schema... it must be a BaseModel type, a dict describing OPENAPI schema or a dict of of fields with descriptions as values"
-            )
-    else:
-        arguments_fields = get_arguments_as_pydantic_fields(func)
-
         if func_docs:
-            docstrings_param_description = find_and_parse_params_from_docstrings(
-                func_docs, format=format
-            )
-            if docstrings_param_description:
-                if validate_docstrings:
-                    documented_params = set(docstrings_param_description.keys())
-                    implemented_params = set(arguments_fields.keys())
-                    not_implemented = (
-                        documented_params - implemented_params
-                    )  # Set difference: keys in set1 but not in set2
-                    not_documented = (
-                        implemented_params - documented_params
-                    )  # Set difference: keys in set2 but not in set1
+            func_description = parse_function_description_from_docstrings(func_docs)
 
-                    if not_implemented or not_documented:
-                        errs = []
-                        if not_implemented:
-                            errs.append(f"Missing (not implemented): {not_implemented}")
-                        if not_documented:
-                            errs.append(f"Missing (not documented): {not_documented}")
+    if arguments_schema and issubclass(arguments_schema, BaseModel):
+        # Use the Pydantic model's schema directly
+        schema = model_json_schema(arguments_schema)
+        schema["name"] = function_name
+        if func_description:
+            schema["description"] = func_description
+        return sanitize_pydantic_schema(schema)
 
-                        raise ValueError(
-                            f"Docstrings parameters do not match function {func.__module__}.{func.__name__} signature. "
-                            + ",".join(errs)
-                        )
-
-                for arg_name, arg_model_field in arguments_fields.items():
-                    arg_docs = docstrings_param_description.get(arg_name)
-                    if arg_docs:
-
-                        arg_model_field.field_info.description = arg_docs["description"]
-                        enum = parse_enum_from_docstring_param(
-                            arg_docs["type"], arg_docs["description"]
-                        )
-                        if enum:
-                            arg_model_field.field_info.extra["enum"] = enum
-
-        args_schema = {"type": "object", "properties": {}, "required": []}
-
-        flat_models = get_flat_models_from_fields(arguments_fields.values(), set())
-        model_name_map = get_model_name_map(flat_models)
-        for arg_name, arg_model_field in arguments_fields.items():
-
-            param_schema, ref_schema, nested_models_schema = field_schema(
-                arg_model_field, model_name_map=model_name_map
-            )
-            if "$ref" in param_schema:
-                ent_name = param_schema["$ref"].rsplit("/", 1)[-1]
-                param_schema = ref_schema.get(ent_name)
-            elif "$ref" in param_schema.get("items", {}):
-                param_schema["items"]["$ref"]
-                ent_name = param_schema["items"]["$ref"].rsplit("/", 1)[-1]
-                param_schema["items"] = ref_schema.get(ent_name)
-            if nested_models_schema:
-                raise NotImplementedError("Nested models are not supported yet")
-
-            args_schema["properties"][arg_name] = param_schema
-            if arg_model_field.required:
-                args_schema["required"].append(arg_name)
-
-    def pop_prop_title(schema):
-        # title is autogenerated by pydantic and will just costs us tokens....
-        if "title" in schema:
-            del schema["title"]
-        return schema
-
-    args_schema["properties"] = {
-        prop: pop_prop_title(prop_schema)
-        for prop, prop_schema in args_schema["properties"].items()
-    }
-
-    description = (
-        parse_function_description_from_docstrings(func_docs)
-        if func_docs
-        else func_description
+    # Get fields from function signature
+    fields = get_arguments_as_pydantic_fields(func)
+    
+    # Create a dynamic model with these fields
+    model = type(
+        f"{function_name}Schema",
+        (BaseModel,),
+        {
+            "__annotations__": {
+                name: field.annotation for name, field in fields.items()
+            },
+            **{
+                name: (field.default if field.default_factory is None else field.default_factory())
+                for name, field in fields.items()
+                if field.default is not None or field.default_factory is not None
+            },
+        },
     )
 
-    result_schema = {"name": func_name, "parameters": args_schema}
-    if description:
-        result_schema["description"] = description
-    return result_schema
+    # Generate schema
+    schema = model_json_schema(model)
+    schema["name"] = function_name
+    if func_description:
+        schema["description"] = func_description
+
+    # Add docstring descriptions to properties if available
+    if validate_docstrings:
+        func_docs = get_function_docs(func)
+        if func_docs:
+            param_descriptions = find_and_parse_params_from_docstrings(func_docs, format)
+            for param_name, description in param_descriptions.items():
+                if param_name in schema.get("properties", {}):
+                    schema["properties"][param_name]["description"] = description
+
+    return sanitize_pydantic_schema(schema)
 
 
 def format_str_extra(template: str, **kwargs):
