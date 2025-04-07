@@ -3,7 +3,6 @@ import json
 import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Union, cast
 
-import pydantic
 from langchain.callbacks.base import BaseCallbackHandler, BaseCallbackManager
 from langchain.callbacks.manager import (
     AsyncCallbackManagerForChainRun,
@@ -36,12 +35,7 @@ from .output_parsers import (
 )
 from .prompt_template import PromptDecoratorTemplate
 from .schema import OutputWithFunctionCall
-
-if pydantic.__version__ < "2.0.0":
-    from pydantic import PrivateAttr, root_validator
-else:
-    from pydantic.v1.class_validators import root_validator
-    from pydantic.v1.fields import PrivateAttr
+from pydantic import BaseModel, Field, model_validator, PrivateAttr
 
 CachedChatLLM = None
 register_prompt_template = None
@@ -173,18 +167,17 @@ class FunctionsProvider:
 
 
 class LLMDecoratorChain(LLMChain):
-    name: str
-    llm_selector: LlmSelector = None
+    name: str = ""
+    llm_selector: Optional[LlmSelector] = None
     """ Optional LLM selector to pick the right LLM for the job. """
     capture_stream: bool = False
     expected_gen_tokens: Optional[int] = None
     llm_selector_rule_key: Optional[str] = None
     allow_retries: bool = True
-    format_instructions_parameter_key: str = ("FORMAT_INSTRUCTIONS",)
-
+    format_instructions_parameter_key: str = "FORMAT_INSTRUCTIONS"
     prompt_type: PromptTypeSettings = PromptTypes.UNDEFINED
-    default_call_kwargs: Optional[Dict[str, Any]]
-    _additional_instruction: Optional[str] = PrivateAttr()
+    default_call_kwargs: Dict[str, Any] = {}
+    _additional_instruction: Optional[str] = PrivateAttr(default=None)
     _is_retry: Optional[str] = PrivateAttr(default=False)
 
     def __call__(
@@ -585,27 +578,20 @@ class LLMDecoratorChainWithFunctionSupport(LLMDecoratorChain):
 
         return self._generate_output_with_function_call(result, result_data)
 
-    @root_validator(pre=True)
+    @model_validator(mode="before")
+    @classmethod
     def validate_and_prepare_chain(cls, values):
-        functions = values.get("functions", None)
-        llm = values.get("llm", None)
-        if isinstance(functions, list):
-            values["functions"] = FunctionsProvider(functions)
-        elif isinstance(functions, FunctionsProvider):
-            values["functions"] = functions
-        elif functions:
-            raise ValueError(
-                f"functions must be a List[Callable|BaseTool] or FunctionsProvider instance. Got: {functions.__class__}"
-            )
-
-        if not llm:
-            raise ValueError("llm must be defined")
-
-        # if not "OpenAI" in type(llm).__name__ and (
-        #     CachedChatLLM and not isinstance(llm, CachedChatLLM)
-        # ):
-        #     raise ValueError(f"llm must be a ChatOpenAI instance. Got: {llm}")
-
+        if not values.get("func_name_map"):
+            functions = values.get("functions")
+            if isinstance(functions, list):
+                values["functions"] = FunctionsProvider(functions)
+            elif isinstance(functions, FunctionsProvider):
+                pass
+            else:
+                raise ValueError(
+                    "functions must be a list of functions or FunctionsProvider"
+                )
+            values["func_name_map"] = values["functions"].func_name_map
         return values
 
     def get_final_function_schemas(self, inputs):

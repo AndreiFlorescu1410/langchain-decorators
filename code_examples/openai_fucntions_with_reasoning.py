@@ -62,9 +62,6 @@ print("Naive agent:")
 NaiveAgent().run("I have a great idea,let's eat the whole tub of ice cream")
 print("\n\nReasonable agent:")
 ReasonableAgent().run("I have a great idea,let's eat the whole tub of ice cream")
-
-
-
   
 
 # Naive agent:

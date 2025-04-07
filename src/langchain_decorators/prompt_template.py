@@ -1,4 +1,3 @@
-
 import logging
 import re
 import inspect
@@ -6,8 +5,6 @@ from abc import ABC, abstractmethod
 from string import Formatter
 
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple, Union
-
-
 
 from langchain.prompts import StringPromptTemplate, PromptTemplate
 from langchain.prompts.chat import  MessagesPlaceholder, ChatMessagePromptTemplate, ChatPromptTemplate, ChatPromptValue
@@ -18,14 +15,7 @@ from .schema import OutputWithFunctionCall
 from .common import LogColors, PromptTypeSettings, get_func_return_type, get_function_docs, get_function_full_name, print_log
 from .output_parsers import *
 
-
-
-import pydantic
-if pydantic.__version__ <"2.0.0":
-    from pydantic import BaseModel
-else:
-    from pydantic.v1 import BaseModel
-
+from pydantic import BaseModel
 
 class BaseTemplateBuilder(ABC):
 
@@ -105,7 +95,7 @@ class PromptTemplateDraft(BaseModel):
     role:str=None
     input_variables:List[str]
     template:str
-    partial_variables_builders:Optional[Dict[str, Callable[[dict], str]]]
+    partial_variables_builders:Optional[Dict[str, Callable[[dict], str]]] = None
 
     def finalize_template(self, input_variable_values:dict)->Union[MessagesPlaceholder, ChatMessagePromptTemplate, StringPromptTemplate]:
         if self.role=="placeholder":
@@ -182,167 +172,169 @@ def build_template_drafts(template:str, format:str, role:str=None )->PromptTempl
         return PromptTemplateDraft(role=role, input_variables=input_variables, template=template, partial_variables_builders=partial_builders)
         
 
-class PromptDecoratorTemplate(StringPromptTemplate):
-    template_string:str
-    prompt_template_drafts:Union[PromptTemplateDraft, List[PromptTemplateDraft]]
-    template_name:str
-    template_format:str
-    optional_variables:List[str]
-    default_values:Dict[str,Any]
-    format_instructions_parameter_key:str
-    template_version:str=None
-    prompt_type:PromptTypeSettings = None
-    original_kwargs:dict=None
+def parse_prompt_template_from_string(template_string: str, format: str = "f-string-extra") -> List[PromptTemplateDraft]:
+    """Parse a prompt template from a string.
     
+    Args:
+        template_string (str): The template string to parse.
+        format (str, optional): The format of the template. Defaults to "f-string-extra".
+        
+    Returns:
+        List[PromptTemplateDraft]: A list of prompt template drafts.
+    """
+    prompts = parse_prompts_from_docs(template_string)
+    
+    if isinstance(prompts, list):
+        prompt_template_drafts = []
+        
+        for prompt in prompts:
+            if isinstance(prompt, str):
+                prompt_template_drafts.append(build_template_drafts(prompt, format=format))
+            else:
+                role, content_template = prompt
+                message_template = build_template_drafts(content_template, format=format, role=role)
+                prompt_template_drafts.append(message_template)
+    else:
+        prompt_template_drafts = [build_template_drafts(prompts, format=format)]
+    
+    return prompt_template_drafts
 
-    
+class PromptDecoratorTemplate(StringPromptTemplate):
+    template_string: str = ""
+    prompt_template_drafts: Union[PromptTemplateDraft, List[PromptTemplateDraft]] = []
+    template_name: str = ""
+    template_format: str = "f-string-extra"
+    optional_variables: List[str] = []
+    default_values: Dict[str, Any] = {}
+    format_instructions_parameter_key: str = "FORMAT_INSTRUCTIONS"
+    template_version: str = "1.0.0"  # Making this optional with a default value
+    prompt_type: Optional[PromptTypeSettings] = None
+    original_kwargs: Optional[dict] = None
+
+    def __init__(self, template_string: str, template_name: str, template_format: str, input_variables: List[str], 
+                 prompt_template_drafts: Union[PromptTemplateDraft, List[PromptTemplateDraft]], 
+                 optional_variables: List[str] = None, default_values: Dict[str, Any] = None,
+                 format_instructions_parameter_key: str = "FORMAT_INSTRUCTIONS", template_version: str = "1.0.0",
+                 prompt_type: PromptTypeSettings = None, original_kwargs: dict = None, **kwargs):
+        super().__init__(input_variables=input_variables, **kwargs)
+        self.template_string = template_string
+        self.template_name = template_name
+        self.template_format = template_format
+        self.prompt_template_drafts = prompt_template_drafts
+        self.optional_variables = optional_variables or []
+        self.default_values = default_values or {}
+        self.format_instructions_parameter_key = format_instructions_parameter_key
+        self.template_version = template_version
+        self.prompt_type = prompt_type
+        self.original_kwargs = original_kwargs or {}
 
     @classmethod 
-    def build(cls, 
-              template_string:str, 
-              template_name:str,
-              template_format:str="f-string-extra", 
-              output_parser:Union[None, BaseOutputParser]=None, 
-              optional_variables:Optional[List[str]]=None,
-              default_values:Optional[Dict[str,Any]]=None,
-              format_instructions_parameter_key:str="FORMAT_INSTRUCTIONS",
-              template_version:str=None,
-              prompt_type:PromptTypeSettings = None,
-              original_kwargs:dict=None
-            )->"PromptDecoratorTemplate":
-            
-        if template_format not in ["f-string","f-string-extra"]:
-            raise ValueError(f"template_format must be one of [f-string, f-string-extra], got {template_format}")
+    def build(self, 
+             template_string:str, 
+             template_name:str=None, 
+             template_version:str="1.0.0",
+             template_format:str="f-string-extra",
+             output_parser:Union[None, BaseOutputParser]=None,
+             optional_variables:List[str]=None,
+             default_values:Dict[str,Any]=None,
+             format_instructions_parameter_key:str="FORMAT_INSTRUCTIONS",
+             prompt_type:PromptTypeSettings=None,
+             **kwargs
+             )->"PromptDecoratorTemplate":
         
-
-        prompts = parse_prompts_from_docs(template_string)
+        optional_variables = optional_variables or []
+        default_values = default_values or {}
         
-        if isinstance(prompts,list):
-            prompt_template_drafts=[]
-            input_variables=[]
-            
-        for prompt in prompts:
-            if isinstance(prompt,str):
-                prompt_template_drafts=build_template_drafts(prompt, format=template_format)
-                input_variables=prompt_template_drafts.input_variables
-                #there should be only one prompt if it's a string
-                break
-            else:
-                (role, content_template)= prompt
-                message_template = build_template_drafts(content_template, format=template_format, role=role)
-                input_variables.extend(message_template.input_variables)
-                prompt_template_drafts.append(message_template)
+        if template_format == "f-string-extra":
+            prompt_template_drafts = parse_prompt_template_from_string(template_string, format=template_format)
+            input_variables = []
+            for draft in prompt_template_drafts:
+                input_variables.extend(draft.input_variables)
+            input_variables = list(set(input_variables))
+        else:
+            raise ValueError(f"Unsupported template format: {template_format}")
         
+        return PromptDecoratorTemplate(
+            template_string=template_string,
+            template_name=template_name,
+            template_version=template_version,
+            template_format=template_format,
+            input_variables=input_variables,
+            optional_variables=optional_variables,
+            default_values=default_values,
+            output_parser=output_parser,
+            format_instructions_parameter_key=format_instructions_parameter_key,
+            prompt_type=prompt_type,
+            prompt_template_drafts=prompt_template_drafts,
+            **kwargs
+        )
 
-
-
-        return cls(
-                input_variables=input_variables, #defined in base
-                output_parser=output_parser,#defined in base
-                prompt_template_drafts=prompt_template_drafts,
-                template_name=template_name,
-                template_version=template_version,
-                template_string=template_string,
-                template_format=template_format,
-                optional_variables=optional_variables,
-                default_values=default_values,
-                format_instructions_parameter_key=format_instructions_parameter_key,
-                prompt_type=prompt_type,
-                original_kwargs=original_kwargs
-            )
-        
     @classmethod 
     def from_func(cls, 
                   func:Union[Callable, Coroutine], 
                   template_name:str=None, 
-                  template_version:str=None, 
+                  template_version:str="1.0.0",
                   output_parser:Union[str,None, BaseOutputParser]="auto", 
-                  template_format:str = "f-string-extra",
+                  template_format:str="f-string-extra",
                   format_instructions_parameter_key:str="FORMAT_INSTRUCTIONS",
-                  prompt_type:PromptTypeSettings = None,
+                  prompt_type:PromptTypeSettings=None,
                   original_kwargs:dict=None
                   )->"PromptDecoratorTemplate":
         
         template_string = get_function_docs(func)  
-        template_name=template_name or get_function_full_name(func)
+        template_name = template_name or get_function_full_name(func)
         return_type = get_func_return_type(func)
+        original_kwargs = original_kwargs or {}
         
         if original_kwargs.get("output_parser"):
             output_parser = original_kwargs.pop("output_parser")
-        
-        if output_parser=="auto":
-            if return_type==str or return_type==None:
-                output_parser = "str"
-            elif return_type==dict:
-                output_parser = "json"
-            elif return_type==list:
-                _, args = get_func_return_type(func, with_args=True)
-                output_parser = "list"
-                if args:
-                    if issubclass(args[0],BaseModel):
-                        output_parser = "pydantic"
-                    elif issubclass(args[0],dict):
-                        output_parser = "json"
-                    elif issubclass(args[0],str):
-                        output_parser = "list"
-                    else:
-                        raise Exception(f"Unsupported item type in annotation of {template_name} -> {return_type}[{args}]")
-            elif return_type==bool:
-                output_parser = "boolean"
-            elif issubclass(return_type, OutputWithFunctionCall):
-                output_parser = "str"
-            elif issubclass(return_type,BaseModel):
-                output_parser = PydanticOutputParser(model=return_type)
-            else:
-                raise Exception(f"Unsupported return type {return_type}")
-        if isinstance(output_parser,str):
-            if output_parser=="str":
+            
+        if output_parser == "auto":
+            output_parser = get_output_parser_for_type(return_type)
+            
+        if isinstance(output_parser, str):
+            if output_parser == "str":
                 output_parser = None
-            elif output_parser=="json":
+            elif output_parser == "json":
                 output_parser = JsonOutputParser()
-            elif output_parser=="boolean":
+            elif output_parser == "boolean":
                 output_parser = BooleanOutputParser()
-            elif output_parser=="markdown":
-                if return_type and return_type!=dict:
+            elif output_parser == "markdown":
+                if return_type and return_type != dict:
                     raise Exception(f"Conflicting output parsing instructions. Markdown output parser only supports return type dict, got {return_type}.")
                 else:
                     output_parser = MarkdownStructureParser()
-            elif output_parser=="list":
+            elif output_parser == "list":
                 output_parser = ListOutputParser()
-            elif  output_parser == "pydantic":
-                if issubclass(return_type,BaseModel):
+            elif output_parser == "pydantic":
+                if issubclass(return_type, BaseModel):
                     output_parser = PydanticOutputParser(model=return_type)
-                elif return_type==None:
-                    raise Exception(f"You must annotate the return type for pydantic output parser, so that we can infer the model")
+                elif return_type is None:
+                    raise Exception("You must annotate the return type for pydantic output parser, so that we can infer the model")
                 else:
                     raise Exception(f"Unsupported return type {return_type} for pydantic output parser")
-            elif output_parser=="functions":
+            elif output_parser == "functions":
                 if not return_type:
-                    raise Exception(f"You must annotate the return type for functions output parser, so that we can infer the model")
-                elif not issubclass(return_type,OutputWithFunctionCall):
-                    if issubclass(return_type,BaseModel):
+                    raise Exception("You must annotate the return type for functions output parser, so that we can infer the model")
+                elif not issubclass(return_type, OutputWithFunctionCall):
+                    if issubclass(return_type, BaseModel):
                         output_parser = OpenAIFunctionsPydanticOutputParser(model=return_type)
                     else:
                         raise Exception(f"Functions output parser only supports return type pydantic models, got {return_type}")
                 else:
-                    output_parser=None
+                    output_parser = None
             else:
                 raise Exception(f"Unsupported output parser {output_parser}")
-
-        
-        default_values = {k:v.default for k,v in inspect.signature(func).parameters.items() if v.default!=inspect.Parameter.empty}
-
+            
         return cls.build(
             template_string=template_string,
             template_name=template_name,
             template_version=template_version,
-            output_parser=output_parser,
             template_format=template_format,
-            optional_variables=[*default_values.keys()],
-            default_values=default_values,
+            output_parser=output_parser,
             format_instructions_parameter_key=format_instructions_parameter_key,
             prompt_type=prompt_type,
-            original_kwargs=original_kwargs
+            **original_kwargs
         )
 
 
@@ -421,4 +413,30 @@ class PromptDecoratorTemplate(StringPromptTemplate):
             
         log_color =  LogColors.DARK_GRAY # we dont want to color the prompt, is's misleading... we color only the output
         print_log(f"Prompt:\n{formatted}",  log_level , log_color)
+
+def get_output_parser_for_type(return_type):
+    if return_type == str or return_type is None:
+        return None
+    elif return_type == dict:
+        return JsonOutputParser()
+    elif return_type == list:
+        _, args = get_func_return_type(return_type, with_args=True)
+        if not args:
+            return ListOutputParser()
+        if issubclass(args[0], BaseModel):
+            return PydanticOutputParser(model=args[0])
+        elif issubclass(args[0], dict):
+            return JsonOutputParser()
+        elif issubclass(args[0], str):
+            return ListOutputParser()
+        else:
+            raise Exception(f"Unsupported item type in list annotation: {args[0]}")
+    elif return_type == bool:
+        return BooleanOutputParser()
+    elif issubclass(return_type, OutputWithFunctionCall):
+        return None
+    elif issubclass(return_type, BaseModel):
+        return PydanticOutputParser(model=return_type)
+    else:
+        raise Exception(f"Unsupported return type {return_type}")
 
