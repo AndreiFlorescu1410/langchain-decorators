@@ -413,12 +413,9 @@ class LLMDecoratorChain(LLMChain):
         )
         if self.prompt.output_parser:
             if result:
-                try:
-                    result = self.prompt.output_parser.parse(result)
-                except:
-                    result = (
-                        False if result and "yes" in result.lower() else False
-                    )  # usually its something like "Im sorry..."
+                #TODO: temporary fix. This should be configurable by a raise_on_output_parsing_error flag
+                # Also, look into allow_retries
+                result = self.prompt.output_parser.parse(result)
         return result
 
     def select_llm(self, prompts, inputs=None):
