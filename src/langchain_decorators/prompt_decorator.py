@@ -466,6 +466,12 @@ def llm_prompt(
                     kwargs[key] = value
             return kwargs
 
+        def get_all_function_args(func, *args, **kwargs):
+            sig = inspect.signature(func)
+            bound_args = sig.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+            return dict(bound_args.arguments)
+
         def get_preprocessing_args_by_running_func(*args, **kwargs):
             # temporary, we should always declare the args we want to use, but its not backward compatible
             kwargs_keys = [*inspect.signature(func).parameters.keys()]
@@ -489,6 +495,8 @@ def llm_prompt(
 
             @wraps(func)
             def wrapper(*args, **kwargs):
+                kwargs = get_all_function_args(func, *args, **kwargs)
+                
                 _kwargs = get_preprocessing_args_by_running_func(*args, **kwargs)
 
                 if _kwargs:
