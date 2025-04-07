@@ -11,7 +11,6 @@ from .function_decorator import llm_function
 from .pydantic_helpers import *
 
 from pydantic import BaseModel, ValidationError, Field
-from pydantic.json_schema import model_json_schema
 from pydantic.fields import FieldInfo
 
 class ErrorCodes:
@@ -194,54 +193,110 @@ class PydanticOutputParser(BaseOutputParser[T]):
             msg = f"Failed to parse {self.model.__name__}:\n{humanize_pydantic_validation_error(e)}"
             raise OutputParserExceptionWithOriginal(msg, text, error_code=ErrorCodes.DATA_VALIDATION_ERROR)
 
-    def get_json_example_description(self, model:Type[BaseModel]=None, indentation_level=0):
-        """Get a description of the model as a JSON example."""
-        model = model or self.model
-        schema = model_json_schema(model)
-        properties = schema.get("properties", {})
-        required = schema.get("required", [])
+    
+    def get_json_example_description(self, model_type:type=None, indentation_level=0):
+        model_type = model_type or self.model
+        _indent = "\t" * indentation_level
+        _description = ''
         
-        lines = []
-        indent = "  " * indentation_level
+        _nullable = get_origin(model_type) is Union and type(None) in get_args(model_type)
+    
+        if _nullable:
+            model_type = get_args(model_type)[0]
         
-        for field_name, field_schema in properties.items():
-            field_type = field_schema.get("type", "any")
-            field_description = field_schema.get("description", "")
-            is_required = field_name in required
-            
-            if field_type == "object" and "properties" in field_schema:
-                # Nested object
-                lines.append(f"{indent}{field_name}: {{  # {field_description}")
-                lines.append(self.get_json_example_description(field_schema, indentation_level + 1))
-                lines.append(f"{indent}}}")
-            elif field_type == "array" and "items" in field_schema:
-                # Array type
-                items_schema = field_schema["items"]
-                if items_schema.get("type") == "object":
-                    lines.append(f"{indent}{field_name}: [  # {field_description}")
-                    lines.append(self.get_json_example_description(items_schema, indentation_level + 1))
-                    lines.append(f"{indent}]")
-                else:
-                    example = f"[{items_schema.get('type', 'any')}]"
-                    lines.append(f"{indent}{field_name}: {example}  # {field_description}")
+        if isinstance(model_type, type) and issubclass(model_type, BaseModel):
+            _description = self.get_json_example_description_pydantic(model_type, indentation_level)
+        else:
+            origin = get_origin(model_type)
+            if origin is None:
+                _type = model_type
+            elif origin is list:
+                _type = list
+                _item_type = get_args(model_type)[0] if get_args(model_type) else None
+            elif origin is dict:
+                _type = dict
+            elif origin is Union:
+                _type = model_type
+            elif origin is Any:
+                _type = Any
             else:
-                # Simple type
-                example = field_schema.get("example", field_type)
-                suffix = "" if is_required else " (optional)"
-                lines.append(f"{indent}{field_name}: {example}  # {field_description}{suffix}")
+                _type = origin
+
+            if origin is Union:
+                alternative_types = [union_type for union_type in get_args(_type) if union_type != type(None)]
+                items = []
+                next_indent = "\t" * (indentation_level + 1)
+                for union_type in alternative_types:
+                    item_desc = self.get_json_example_description(union_type, indentation_level + 1)
+                    items.append(f"{next_indent}{item_desc}")
+                
+                _description = f"\n\n{next_indent}or\n\n".join(items)
+            elif isinstance(_type, type) and issubclass(_type, BaseModel):
+                nested_desc = self.get_json_example_description_pydantic(_type, indentation_level + 1)
+                _description = f"{_type.__name__}\n{nested_desc}"
+            elif _type == datetime:
+                _description = "ISO formatted datetime string"
+            elif _type == str:
+                _description = "string"
+            elif _type in [bool, int, float]:
+                _description = f"{_type.__name__}"
+            elif _type == dict:
+                _description = "valid JSON object"
+            elif _type == list:
+                if _item_type:
+                    item_desc = self.get_json_example_description(_item_type, indentation_level + 1)
+                    _description = f"valid JSON array\n{_indent}[\n{item_desc}\n{_indent}]"
+                else:
+                    _description = "valid JSON array"
+            elif _type is Any:
+                _description = "any value"
+            else:
+                _description = str(_type)
+            
+            if _nullable:
+                _description = "[optional] " + _description
         
-        return "\n".join(lines)
+        return _description
+        
+
+    def get_json_example_description_pydantic(self, model:Type[BaseModel]=None, indentation_level=0):
+        model = model or self.model
+        _indent = "\t" * indentation_level
+        field_descriptions = {}
+        
+        for field, field_info in model.model_fields.items():
+            field_type = field_info.annotation
+            field_desc = field_info.description or ""
+            
+            # Get the type description at the next indentation level
+            type_desc = self.get_json_example_description(field_type, indentation_level + 1)
+            field_descriptions[field] = f"{field_desc} as {type_desc}"
+
+        lines = []
+        for field, desc in field_descriptions.items():
+            lines_split = desc.splitlines()
+            if len(lines_split) > 1:
+                # For multi-line descriptions, format with proper indentation
+                first_line = lines_split[0]
+                rest_lines = "\n".join([f"{_indent}\t{line}" for line in lines_split[1:]])
+                formatted_desc = f"{first_line}\n{rest_lines}"
+            else:
+                formatted_desc = desc
+                
+            lines.append(f"{_indent}\t\"{field}\": {formatted_desc}")
+
+        return f"\n{_indent}{{\n" + ",\n".join(lines) + f"\n{_indent}}}"
+
 
     def get_format_instructions(self) -> str:
         """Instructions on how the LLM output should be formatted."""
         if self.instructions_as_json_example:
-            schema = model_json_schema(self.model)
             example = self.get_json_example_description()
             return dedent(f"""Return a JSON object that matches the following schema:
             {example}
             """)
         else:
-            schema = model_json_schema(self.model)
+            schema =self.model.model_json_schema()
             return dedent(f"""Return a JSON object that matches the following schema:
             {json.dumps(schema, indent=2)}
             """)
@@ -474,9 +529,9 @@ class MarkdownStructureParser(ListOutputParser):
 
 def _get_str_field_description(field_info: FieldInfo, ignore_nullable: bool = False, default="?") -> str:
     """Get a string description of a field for LLM prompts."""
-    field_type = get_field_type(field_info)
-    is_nullable = is_field_nullable(field_info) if not ignore_nullable else False
-    item_type = get_field_item_type(field_info)
+    field_type = field_info.annotation
+    is_nullable = get_origin(field_type) is Union and type(None) in get_args(field_type) if not ignore_nullable else False
+    item_type = get_args(field_type)[0] if get_origin(field_type) in (list, dict) else None
     
     type_str = str(field_type.__name__ if hasattr(field_type, '__name__') else field_type)
     if item_type:
